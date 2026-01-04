@@ -1,0 +1,238 @@
+import React, { useEffect, useState } from "react";
+import "./CartPage.css";
+import { Header } from "./Header";
+import { Footer } from "./Footer";
+import { useNavigate } from "react-router-dom";
+
+const CartPage = () => {
+  const [cartItems, setCartItems] = useState([]);
+  const [overallPrice, setOverallPrice] = useState(0);
+  const [username, setUsername] = useState("");
+  const [subtotal, setSubtotal] = useState(0);
+  const navigate = useNavigate();
+
+  // Load Razorpay script dynamically
+  const loadRazorpayScript = () => {
+    return new Promise((resolve) => {
+      if (window.Razorpay) {
+        resolve(true);
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  };
+
+  useEffect(() => {
+    const fetchCartItems = async () => {
+      try {
+        const response = await fetch("http://localhost:8080/api/cart/items", {
+          credentials: "include",
+        });
+        if (!response.ok) throw new Error("Failed to fetch cart items");
+        const data = await response.json();
+
+        setCartItems(
+          data?.cart?.products.map((item) => ({
+            ...item,
+            total_price: parseFloat(item.total_price).toFixed(2),
+            price_per_unit: parseFloat(item.price_per_unit).toFixed(2),
+          })) || []
+        );
+        setOverallPrice(parseFloat(data?.cart?.overall_total_price || 0).toFixed(2));
+        setUsername(data?.username || "");
+      } catch (error) {
+        console.error("Error fetching cart items:", error);
+      }
+    };
+
+    fetchCartItems();
+  }, []);
+
+  useEffect(() => {
+    const total = cartItems.reduce((total, item) => total + parseFloat(item.total_price), 0).toFixed(2);
+    setSubtotal(total);
+  }, [cartItems]);
+
+  const handleRemoveItem = async (productId) => {
+    try {
+      const response = await fetch("http://localhost:8080/api/cart/delete", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, productId }),
+      });
+      if (response.status === 204) {
+        setCartItems((prevItems) => prevItems.filter((item) => item.product_id !== productId));
+      } else throw new Error("Failed to remove item");
+    } catch (error) {
+      console.error("Error removing item:", error);
+    }
+  };
+
+  const handleQuantityChange = async (productId, newQuantity) => {
+    try {
+      if (newQuantity <= 0) {
+        handleRemoveItem(productId);
+        return;
+      }
+      const response = await fetch("http://localhost:8080/api/cart/update", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, productId, quantity: newQuantity }),
+      });
+      if (response.ok) {
+        setCartItems((prevItems) =>
+          prevItems.map((item) =>
+            item.product_id === productId
+              ? {
+                  ...item,
+                  quantity: newQuantity,
+                  total_price: (item.price_per_unit * newQuantity).toFixed(2),
+                }
+              : item
+          )
+        );
+      } else throw new Error("Failed to update quantity");
+    } catch (error) {
+      console.error("Error updating quantity:", error);
+    }
+  };
+
+  const handleCheckout = async () => {
+    try {
+      const isScriptLoaded = await loadRazorpayScript();
+      if (!isScriptLoaded || !window.Razorpay) {
+        alert("Failed to load Razorpay. Please check your internet connection.");
+        return;
+      }
+
+      const requestBody = {
+        totalAmount: subtotal,
+        cartItems: cartItems.map((item) => ({
+          productId: item.product_id,
+          quantity: item.quantity,
+          price: item.price_per_unit,
+        })),
+      };
+
+      const response = await fetch("http://localhost:8080/api/payment/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+      const razorpayOrderId = await response.text();
+
+      const options = {
+        key: "rzp_test_LYS8dX2R4QwMie",
+        amount: subtotal * 100,
+        currency: "INR",
+        name: "SalesSavvy",
+        description: "Test Transaction",
+        order_id: razorpayOrderId,
+        handler: async function (response) {
+          try {
+            const verifyResponse = await fetch("http://localhost:8080/api/payment/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({
+                razorpayOrderId: response.razorpay_order_id,
+                razorpayPaymentId: response.razorpay_payment_id,
+                razorpaySignature: response.razorpay_signature,
+              }),
+            });
+            const result = await verifyResponse.text();
+            if (verifyResponse.ok) {
+              alert("Payment verified successfully!");
+              navigate("/customerhome");
+            } else {
+              alert("Payment verification failed: " + result);
+            }
+          } catch (error) {
+            console.error("Error verifying payment:", error);
+            alert("Payment verification failed. Please try again.");
+          }
+        },
+        prefill: {
+          name: username,
+          email: "test@example.com",
+          contact: "6300244718",
+        },
+        theme: {
+          color: "#3399cc",
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
+    } catch (error) {
+      alert("Payment failed. Please try again.");
+      console.error("Error during checkout:", error);
+    }
+  };
+
+  const totalProducts = () => cartItems.reduce((acc, item) => acc + item.quantity, 0);
+  const shipping = (5.0 * 74).toFixed(2);
+
+  if (cartItems.length === 0) {
+    return (
+      <div className="cart-page empty">
+        <h2>Your Cart is Empty</h2>
+        <p>Add some items to get started!</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ width: "100vw" }}>
+      <Header cartCount={totalProducts()} username={username} />
+      <div className="cart-container">
+        <div className="cart-page">
+          <a href="#" className="back-button">← Shopping Continue</a>
+
+          <div className="cart-header">
+            <h2>Shopping Cart</h2>
+            <p>You have {cartItems.length} items in your cart</p>
+          </div>
+
+          <div className="cart-items">
+            {cartItems.map((item) => (
+              <div key={item.product_id} className="cart-item">
+                <img src={item.image_url || "https://via.placeholder.com/80?text=No+Image"} alt={item.name} />
+                <div className="item-details">
+                  <h3>{item.name}</h3>
+                  <p>{item.description}</p>
+                  <div className="quantity-controls">
+                    <button onClick={() => handleQuantityChange(item.product_id, item.quantity - 1)}>-</button>
+                    <span>{item.quantity}</span>
+                    <button onClick={() => handleQuantityChange(item.product_id, item.quantity + 1)}>+</button>
+                  </div>
+                  <span className="price">₹{item.total_price}</span>
+                  <button onClick={() => handleRemoveItem(item.product_id)}>🗑️</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="checkout-section">
+          <h2>Order Summary</h2>
+          <p>Total: ₹{(parseFloat(subtotal) + parseFloat(shipping)).toFixed(2)}</p>
+          <button onClick={handleCheckout}>Proceed to Checkout</button>
+        </div>
+      </div>
+      <Footer />
+    </div>
+  );
+};
+
+export default CartPage;
